@@ -10,8 +10,8 @@ def generate_gps_signal(num_samples, signal_power, jammer_power, noise_power):
     t = np.linspace(0, 1, num_samples)
     gps_signal = np.sqrt(signal_power) * np.sin(2 * np.pi * 10 * t)  # Clean GPS signal
     jammer_signal = np.sqrt(jammer_power) * np.random.randn(num_samples)  # Jamming
-    noise = np.sqrt(noise_power) * np.random.randn(num_samples)  # Noise
-    return gps_signal, gps_signal + jammer_signal + noise
+    
+    return gps_signal, gps_signal + jammer_signal 
 
 # Step 2: Generate Twinning Waveforms
 def generate_twinning_waveforms(num_samples):
@@ -26,9 +26,20 @@ def generate_twinning_waveforms(num_samples):
 # Step 3: Matched Filter Implementation
 def matched_filter(input_signal, template_signal):
     """
-    Apply a matched filter to enhance the true signal.
+    Apply a normalized matched filter to enhance the true signal.
     """
-    return convolve(input_signal, template_signal[::-1], mode='same')
+    t = np.linspace(0, 1000 / 20, 1000)
+
+    template_signal = template_signal / np.linalg.norm(template_signal)  # Normalize the template
+    filtered_output = convolve(input_signal, template_signal[::-1], mode='full')
+    phase_offset = np.argmax(filtered_output) - len(filtered_output) // 2
+
+    # Adjust the template phase based on the detected phase offset
+    corrected_template = np.sin(2 * np.pi * 10 * (t - phase_offset / 20))
+    filtered_output = convolve(input_signal, corrected_template[::-1], mode='full')
+    center_output = filtered_output[len(filtered_output)//2 - len(input_signal)//2 : len(filtered_output)//2 + len(input_signal)//2]
+    return center_output
+
 
 # Step 4: Dynamic CFAR Detector
 def dynamic_cfar(signal, num_guard, num_reference, scaling_factor):
@@ -114,9 +125,12 @@ def demodulate_am(signal):
 # Simulation Parameters
 num_samples = 1000
 signal_power = 1.0   # Increased signal power
-jammer_power = 10.0
+jammer_power =10.0
 noise_power = 0.5
 num_atoms = 5  # Number of atoms in the dictionary
+
+template_signal = np.sqrt(signal_power) * np.sin(2 * np.pi * 10 * t)
+
 
 # Generate Clean GPS Signal and Jammed Signal
 gps_signal, jammed_signal = generate_gps_signal(num_samples, signal_power, jammer_power, noise_power)
@@ -125,7 +139,7 @@ gps_signal, jammed_signal = generate_gps_signal(num_samples, signal_power, jamme
 chirp1, chirp2 = generate_twinning_waveforms(num_samples)
 
 # Apply Matched Filtering
-filtered_signal = matched_filter(jammed_signal, gps_signal)
+filtered_signal = matched_filter(jammed_signal, template_signal)
 
 # Convolve with Twinning Waveforms
 response_chirp1 = np.convolve(filtered_signal, chirp1, mode='same')
@@ -161,7 +175,7 @@ plt.grid()
 
 plt.subplot(4, 2, 2)
 plt.plot(gps_signal, label="GPS Signal", color="red")
-plt.title("GPS Signal")
+plt.title("Authentic Signal")
 plt.xlabel("Samples")
 plt.ylabel("Amplitude")
 plt.legend()
@@ -185,14 +199,14 @@ plt.ylabel("Amplitude")
 plt.legend()
 plt.grid()
 
-# Demodulated Signal
-plt.subplot(4, 1, 4)
-plt.plot(demodulated_signal, label="Demodulated Signal", color="orange")
-plt.title("Demodulated Baseband Signal")
-plt.xlabel("Samples")
-plt.ylabel("Amplitude")
-plt.legend()
-plt.grid()
+# # Demodulated Signal
+# plt.subplot(4, 1, 4)
+# plt.plot(demodulated_signal, label="Demodulated Signal", color="orange")
+# plt.title("Demodulated Baseband Signal")
+# plt.xlabel("Samples")
+# plt.ylabel("Amplitude")
+# plt.legend()
+# plt.grid()
 
-plt.tight_layout()
-plt.show()
+# plt.tight_layout()
+# plt.show()
