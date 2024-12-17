@@ -1,0 +1,336 @@
+import numpy as np
+import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D
+from scipy.stats import chi2
+
+# Cyclic Correlation Matrix Estimation using Multiple Data Blocks
+def estimate_cyclic_correlation_matrix(signal, block_size, num_blocks, delay):
+    """
+    Estimate the cyclic correlation matrix using multiple data blocks.
+
+    Parameters:
+        signal (ndarray): Received signal of shape (N, total_samples), where N is the number of antennas.
+        block_size (int): Number of samples per data block.
+        num_blocks (int): Number of data blocks.
+        delay (int): Delay for cyclic correlation (e.g., corresponding to PRN period).
+    
+    Returns:
+        R_c (ndarray): Estimated cyclic correlation matrix of shape (N, N).
+    """
+    N, total_samples = signal.shape
+    assert total_samples >= block_size * num_blocks, "Not enough samples for the specified number of blocks."
+
+    # Initialize the cyclic correlation matrix
+    R_c = np.zeros((N, N), dtype=complex)
+
+    # Estimate the cyclic correlation matrix by averaging multiple data blocks
+    for g in range(num_blocks):
+        start_idx = g * block_size  # Start index of current data block
+        end_idx = start_idx + block_size
+
+        # Data block and delayed version of the block
+        Y = signal[:, start_idx:end_idx]  # Shape: (N, block_size)
+        Y_delayed = np.roll(Y, delay, axis=1)  # Apply delay
+
+        # Update the cyclic correlation matrix estimate
+        R_c += (Y @ Y_delayed.T.conj() + Y_delayed @ Y.T.conj()) / (2 * block_size)  # Hermitian enforcement
+
+    # Average over the number of blocks
+    R_c /= num_blocks
+    return R_c
+
+
+# Signal Subspace Determination using MDL Criterion
+def determine_signal_subspace(R_c, num_antennas, num_samples):
+    """
+    Determine the signal subspace dimension using the MDL criterion.
+
+    Parameters:
+        R_c (ndarray): Cyclic correlation matrix of shape (N, N).
+        num_antennas (int): Number of antennas in the array.
+        num_samples (int): Total number of samples.
+
+    Returns:
+        d (int): Estimated signal subspace dimension.
+        eigvals (ndarray): Eigenvalues of the cyclic correlation matrix.
+        eigvecs (ndarray): Eigenvectors of the cyclic correlation matrix.
+    """
+    # Eigenvalue Decomposition (EVD) of the cyclic correlation matrix
+    eigvals, eigvecs = np.linalg.eigh(R_c)  # EVD returns sorted eigenvalues in ascending order
+    eigvals = eigvals[::-1]  # Reverse to descending order
+    eigvecs = eigvecs[:, ::-1]
+
+    # MDL Criterion to estimate signal subspace dimension
+    mdl = []
+    for d in range(1, num_antennas + 1):
+        term1 = -num_samples * np.sum(np.log(eigvals[d:]) / (num_antennas - d))
+        term2 = d * (2 * num_antennas - d) * np.log(num_samples) / 2
+        mdl.append(term1 + term2)
+
+    # Find the dimension with the minimum MDL value
+    d_opt = np.argmin(mdl) + 1  # Adding 1 as Python uses zero-based indexing
+    return d_opt, eigvals, eigvecs
+
+
+
+# Function to calculate the SSE metric for CCET
+def calculate_sse(eigenvalues, d):
+    """
+    Compute the Sum of Squared Errors (SSE) for CCET algorithm.
+    
+    Parameters:
+        eigenvalues (ndarray): Descending eigenvalues of the cyclic correlation matrix.
+        d (int): Dimension of the signal subspace.
+    
+    Returns:
+        T_sse (float): SSE metric.
+    """
+    # Fit a straight line to the eigenvalues in the signal subspace
+    x = np.arange(1, d + 1)  # Indices of the eigenvalues
+    y = eigenvalues[:d]      # Principal eigenvalues
+    
+    # Perform least squares linear regression to fit a line
+    A = np.vstack([x, np.ones(len(x))]).T
+    slope, intercept = np.linalg.lstsq(A, y, rcond=None)[0]
+    
+    # Compute the SSE (Sum of Squared Errors)
+    y_fit = slope * x + intercept  # Fitted line values
+    T_sse = np.sum((y - y_fit) ** 2)
+    
+    return T_sse
+
+# Function to set detection threshold based on false alarm probability
+def set_detection_threshold(false_alarm_prob, d):
+    """
+    Calculate the detection threshold eta for CCET based on chi-squared distribution.
+    
+    Parameters:
+        false_alarm_prob (float): Desired false alarm probability.
+        d (int): Degrees of freedom (equal to the signal subspace dimension).
+    
+    Returns:
+        eta (float): Detection threshold.
+    """
+    # The test statistic T_sse follows a chi-squared distribution with 'd' degrees of freedom
+    eta = chi2.ppf(1 - false_alarm_prob, df=d)
+    return eta
+
+# Function for CCET Spoofing Detection
+def ccet_spoofing_detection(R_c, false_alarm_prob):
+    """
+    Perform spoofing detection using the CCET algorithm.
+    
+    Parameters:
+        R_c (ndarray): Cyclic correlation matrix of shape (N, N).
+        false_alarm_prob (float): Desired false alarm probability.
+    
+    Returns:
+        decision (bool): True if spoofing is detected, False otherwise.
+        T_sse (float): Computed SSE test statistic.
+        eta (float): Detection threshold.
+    """
+    # Eigenvalue decomposition of the cyclic correlation matrix
+    eigvals, _ = np.linalg.eigh(R_c)
+    eigvals = eigvals[::-1]  # Sort eigenvalues in descending order
+
+    # Estimate signal subspace dimension using MDL or fixed d (user-defined for now)
+    d = np.sum(eigvals > 1e-6)  # Assume signal subspace dimension where eigenvalues > small threshold
+    
+    # Step 1: Compute the SSE metric
+    T_sse = calculate_sse(eigvals, d)
+
+    # Step 2: Set the detection threshold eta
+    eta = set_detection_threshold(false_alarm_prob, d)
+
+    # Step 3: Decision Rule
+    decision = T_sse > eta  # Spoofing detected if T_sse exceeds eta
+
+    return decision, T_sse, eta
+
+import numpy as np
+
+# Function to compute the steering vector for a given angle
+def steering_vector(array_geometry, angle, wavelength=1.0):
+    """
+    Compute the steering vector for a Uniform Linear Array (ULA).
+    
+    Parameters:
+        array_geometry (ndarray): Positions of the antenna elements (in wavelengths).
+        angle (float): Signal's Direction of Arrival (DOA) in degrees.
+        wavelength (float): Wavelength of the signal (default = 1.0 for normalized spacing).
+    
+    Returns:
+        ndarray: Steering vector for the given angle.
+    """
+    k = 2 * np.pi / wavelength  # Wavenumber
+    return np.exp(1j * k * array_geometry * np.sin(np.radians(angle)))
+
+
+# Function for DOA Estimation using the Cyclic MUSIC Algorithm
+def cyclic_music_doa_estimation(R_c, num_sources, array_geometry, scan_angles=np.linspace(-90, 90, 360)):
+    """
+    Perform DOA estimation using the Cyclic MUSIC algorithm.
+    
+    Parameters:
+        R_c (ndarray): Cyclic correlation matrix of shape (N, N).
+        num_sources (int): Number of signal sources (authentic + spoofing signals).
+        array_geometry (ndarray): Positions of the antenna elements in wavelengths.
+        scan_angles (ndarray): Angles to scan for DOA estimation (default: -90 to 90 degrees).
+    
+    Returns:
+        angles (ndarray): Scanned angles in degrees.
+        spectrum (ndarray): MUSIC spectrum values for the scanned angles.
+    """
+    # Eigenvalue decomposition of the cyclic correlation matrix
+    eigvals, eigvecs = np.linalg.eigh(R_c)
+    eigvals = eigvals[::-1]  # Sort eigenvalues in descending order
+    eigvecs = eigvecs[:, ::-1]
+
+    # Split into signal and noise subspaces
+    noise_subspace = eigvecs[:, num_sources:]  # Columns corresponding to noise subspace
+
+    # MUSIC Spectrum Calculation
+    spectrum = []
+    for angle in scan_angles:
+        sv = steering_vector(array_geometry, angle).reshape(-1, 1)  # Steering vector for this angle
+        projection = np.dot(noise_subspace.conj().T, sv)
+        spectrum_value = 1 / np.linalg.norm(projection)  # MUSIC spectrum value
+        spectrum.append(np.abs(spectrum_value))
+    
+    return scan_angles, np.array(spectrum)
+
+
+# Function for Spoofing Signal Mitigation using Subspace Projection
+def mitigate_spoofing(R_c, spoofing_subspace):
+    """
+    Mitigate spoofing signals using subspace projection.
+
+    Parameters:
+        R_c (ndarray): Cyclic correlation matrix of shape (N, N).
+        spoofing_subspace (ndarray): Eigenvectors corresponding to spoofing signals.
+    
+    Returns:
+        R_mitigated (ndarray): Modified cyclic correlation matrix with spoofing mitigated.
+    """
+    # Project onto the orthogonal complement of the spoofing subspace
+    P_null = np.eye(spoofing_subspace.shape[0]) - spoofing_subspace @ spoofing_subspace.conj().T
+    R_mitigated = P_null @ R_c @ P_null.conj().T
+
+    return R_mitigated
+
+
+
+def main():
+    # Simulation Parameters
+    num_antennas = 10           # Number of antenna elements
+    total_samples = 10000       # Total number of samples
+    block_size = 1000           # Samples per data block
+    num_blocks = 10             # Number of data blocks
+    delay = 10                  # Delay for cyclic correlation
+    num_sources = 3             # Number of signals (2 authentic + 1 spoofing)
+    array_geometry = np.linspace(0, (num_antennas - 1) * 0.5, num_antennas)  # Half-wavelength spacing
+    false_alarm_prob = 1e-4     # Desired false alarm probability
+    sampling_rate = 1e6         # Sampling rate in Hz
+    signal_freq = 1e3           # Frequency of the authentic signal (Hz)
+    spoof_freq = 1.1e3          # Frequency of the spoofing signal (Hz)
+
+    # Generate Time Vector
+    t = np.arange(total_samples) / sampling_rate
+
+    # Generate True Signals (2 authentic signals)
+    true_signal_1 = np.exp(1j * 2 * np.pi * signal_freq * t)  # Authentic signal 1
+    true_signal_2 = np.exp(1j * 2 * np.pi * signal_freq * t + np.pi / 4)  # Authentic signal 2 (phase shift)
+
+    # Generate Spoofing Signal
+    spoofing_signal = np.exp(1j * 2 * np.pi * spoof_freq * t + np.pi / 3)  # Spoofing signal
+
+    # Combine Signals with Noise
+    noise_power = 0.01
+    noise = np.sqrt(noise_power / 2) * (np.random.randn(num_antennas, total_samples) +
+                                        1j * np.random.randn(num_antennas, total_samples))
+
+    # Steering vectors for signals
+    steering_true = np.array([steering_vector(array_geometry, 30)])  # True signals from 30°
+    steering_spoof = np.array([steering_vector(array_geometry, 60)])  # Spoofing signal from 60°
+
+    # Array Input Signal
+    signal = (steering_true.T @ true_signal_1.reshape(1, -1) +
+              steering_true.T @ true_signal_2.reshape(1, -1) +
+              steering_spoof.T @ spoofing_signal.reshape(1, -1))
+    received_signal = signal + noise  # Add noise
+
+    # Step 1: Cyclic Correlation Matrix Estimation
+    R_c = estimate_cyclic_correlation_matrix(received_signal, block_size, num_blocks, delay)
+
+    # Step 2: Spoofing Detection using CCET
+    decision, T_sse, eta = ccet_spoofing_detection(R_c, false_alarm_prob)
+    print(f"Spoofing Detected: {'Yes' if decision else 'No'}")
+
+    # Step 3: DOA Estimation
+    angles, spectrum = cyclic_music_doa_estimation(R_c, num_sources, array_geometry)
+
+    # Step 4: Spoofing Mitigation
+    _, eigvecs = np.linalg.eigh(R_c)
+    spoofing_subspace = eigvecs[:, :1]  # Assume first eigenvector corresponds to spoofing signal
+    R_mitigated = mitigate_spoofing(R_c, spoofing_subspace)
+
+    # Step 5: Plots
+
+    plt.figure(figsize=(10, 6))
+
+    plt.plot(t[:3000], true_signal_1[:3000], label="True Signal 1")
+    plt.plot(t[:3000], spoofing_signal[:3000], label="Spoofing Signal")
+
+    plt.title("True Signal vs Spoofing Signal")
+    plt.xlabel("Time (s)")
+    plt.ylabel("Amplitude")
+
+    plt.ylim([-3.5, 3.5])  # Adjust the y-axis limits to include the full wave
+    plt.legend()
+    plt.grid()
+
+    plt.show()
+
+
+    # Plot 2: DOA Spectrum
+    plt.figure(figsize=(10, 6))
+    plt.plot(angles, 10 * np.log10(spectrum / np.max(spectrum)))
+    plt.title("Cyclic MUSIC DOA Spectrum")
+    plt.xlabel("Angle (degrees)")
+    plt.ylabel("Power (dB)")
+    plt.grid()
+
+    # Plot 3: Clean Signal after Spoofing Mitigation
+    # Project the received signal onto the null space of the spoofing subspace
+    P_null = np.eye(num_antennas) - spoofing_subspace @ spoofing_subspace.conj().T
+    clean_signal = np.real(P_null @ received_signal[:, :3000])  # Project first 1000 samples
+    clean_signal_sum = np.sum(clean_signal, axis=0)  # Sum across antennas to collapse to 1D
+
+    plt.figure(figsize=(10, 6))
+    plt.plot(t[:3000], clean_signal_sum, label="Clean Signal after Spoofing Mitigation")
+    plt.title("Signal after Spoofing Suppression")
+    plt.xlabel("Time (s)")
+    plt.ylabel("Amplitude")
+    plt.legend()
+    plt.grid()
+
+
+    # Plot 4: 3D Correlation Result (Similar to Figure 10)
+    fig = plt.figure(figsize=(12, 8))
+    ax = fig.add_subplot(111, projection='3d')
+    sample_grid, angle_grid = np.meshgrid(range(num_blocks), angles)
+    power_grid = np.tile(spectrum, (num_blocks, 1)).T
+
+    ax.plot_surface(sample_grid, angle_grid, 10 * np.log10(power_grid), cmap='viridis')
+    ax.set_title("3D Correlation Result")
+    ax.set_xlabel("Sample Blocks")
+    ax.set_ylabel("Angle (degrees)")
+    ax.set_zlabel("Power (dB)")
+
+    plt.show()
+
+
+if __name__ == "__main__":
+    main()
+
+
