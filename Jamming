@@ -1,0 +1,198 @@
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.signal import chirp, find_peaks, hilbert, convolve
+
+# Step 1: Generate GPS Signal with Jamming and Noise
+def generate_gps_signal(num_samples, signal_power, jammer_power, noise_power):
+    """
+    Generate a simulated GPS signal with jamming and noise.
+    """
+    t = np.linspace(0, 1, num_samples)
+    gps_signal = np.sqrt(signal_power) * np.sin(2 * np.pi * 10 * t)  # Clean GPS signal
+    jammer_signal = np.sqrt(jammer_power) * np.random.randn(num_samples)  # Jamming
+    noise = np.sqrt(noise_power) * np.random.randn(num_samples)  # Noise
+    return gps_signal, gps_signal + jammer_signal + noise
+
+# Step 2: Generate Twinning Waveforms
+def generate_twinning_waveforms(num_samples):
+    """
+    Generate two chirp waveforms with different chirp rates.
+    """
+    t = np.linspace(0, 1, num_samples)
+    chirp1 = chirp(t, f0=0, f1=100, t1=1, method='linear')  # Chirp rate 1
+    chirp2 = chirp(t, f0=0, f1=50, t1=1, method='linear')   # Chirp rate 2
+    return chirp1, chirp2
+
+# Step 3: Matched Filter Implementation
+def matched_filter(input_signal, template_signal):
+    """
+    Apply a matched filter to enhance the true signal.
+    """
+    return convolve(input_signal, template_signal[::-1], mode='same')
+
+# Step 4: Dynamic CFAR Detector
+def dynamic_cfar(signal, num_guard, num_reference, scaling_factor):
+    """
+    Apply dynamic CFAR with adaptive thresholding.
+    """
+    num_cells = len(signal)
+    detections = []
+    adaptive_thresholds = []
+
+    for i in range(num_reference + num_guard, num_cells - num_reference - num_guard):
+        # Reference cells: Exclude guard cells and CUT
+        reference_cells = np.concatenate([
+            signal[i - num_reference - num_guard : i - num_guard],
+            signal[i + num_guard + 1 : i + num_guard + 1 + num_reference]
+        ])
+
+        # Dynamic threshold based on local noise level
+        noise_level = np.median(reference_cells)
+        threshold = scaling_factor * noise_level
+        adaptive_thresholds.append(threshold)
+
+        # Compare CUT with threshold
+        if signal[i] > threshold:
+            detections.append(i)
+
+    return detections, adaptive_thresholds
+
+# Step 5: Estimate Parameters (Delay and Frequency)
+# Step 5: Estimate Parameters (Delay and Frequency)
+def estimate_parameters(peaks_chirp1, peaks_chirp2, chirp_rate1, chirp_rate2):
+    """
+    Estimate jamming parameters (time delay and frequency).
+    """
+    # Convert lists of indices to NumPy arrays to enable element-wise operations
+    peaks_chirp1 = np.array(peaks_chirp1)
+    peaks_chirp2 = np.array(peaks_chirp2)
+
+    # Find the minimum length of the two arrays
+    min_len = min(len(peaks_chirp1), len(peaks_chirp2))
+
+    # Truncate the arrays to the minimum length
+    peaks_chirp1 = peaks_chirp1[:min_len]
+    peaks_chirp2 = peaks_chirp2[:min_len]
+
+    delta_t = peaks_chirp2 - peaks_chirp1  # Time difference
+    delay = (chirp_rate2 * peaks_chirp2 - chirp_rate1 * peaks_chirp1) / (chirp_rate2 - chirp_rate1)
+    frequency = (chirp_rate1 * chirp_rate2 * delta_t) / (chirp_rate2 - chirp_rate1)
+    return delay, frequency
+
+# Step 6: Design Optimized Atomic Dictionary
+def design_atomic_dictionary(delay, frequency, num_atoms, num_samples):
+    """
+    Design an optimized atomic dictionary based on estimated parameters.
+    """
+    t = np.linspace(0, 1, num_samples)
+    dictionary = []
+    for d, f in zip(delay, frequency):
+        atom = np.sin(2 * np.pi * f * (t - d))  # Atom based on delay and frequency
+        dictionary.append(atom)
+    return np.array(dictionary)
+
+# Step 7: Atomic Decomposition and Jamming Suppression
+def atomic_decomposition(signal, dictionary):
+    """
+    Perform atomic decomposition and suppress jamming.
+    """
+    projections = np.dot(dictionary, signal)  # Project signal onto dictionary atoms
+    clean_signal = signal - np.dot(projections.T, dictionary)  # Remove jamming components
+    return clean_signal
+
+# Step 8: Demodulate AM Signal using Envelope Detection
+def demodulate_am(signal):
+    """
+    Demodulate an AM signal using envelope detection.
+    """
+    # Compute the analytic signal using Hilbert Transform
+    analytic_signal = hilbert(signal)
+    # Extract the envelope
+    demodulated_signal = np.abs(analytic_signal)
+    return demodulated_signal
+
+# Simulation Parameters
+num_samples = 1000
+signal_power = 1.0   # Increased signal power
+jammer_power = 10.0
+noise_power = 0.5
+num_atoms = 5  # Number of atoms in the dictionary
+
+# Generate Clean GPS Signal and Jammed Signal
+gps_signal, jammed_signal = generate_gps_signal(num_samples, signal_power, jammer_power, noise_power)
+
+# Generate Twinning Waveforms
+chirp1, chirp2 = generate_twinning_waveforms(num_samples)
+
+# Apply Matched Filtering
+filtered_signal = matched_filter(jammed_signal, gps_signal)
+
+# Convolve with Twinning Waveforms
+response_chirp1 = np.convolve(filtered_signal, chirp1, mode='same')
+response_chirp2 = np.convolve(filtered_signal, chirp2, mode='same')
+
+# Apply Dynamic CFAR Detection
+peaks_dynamic_chirp1, dynamic_thresholds_chirp1 = dynamic_cfar(response_chirp1, num_guard=5, num_reference=20, scaling_factor=3)
+peaks_dynamic_chirp2, dynamic_thresholds_chirp2 = dynamic_cfar(response_chirp2, num_guard=5, num_reference=20, scaling_factor=3)
+
+# Estimate Jamming Parameters
+delay, frequency = estimate_parameters(peaks_dynamic_chirp1, peaks_dynamic_chirp2, 100, 50)
+
+# Design Optimized Atomic Dictionary
+atomic_dict = design_atomic_dictionary(delay, frequency, num_atoms, num_samples)
+
+# Perform Jamming Suppression
+clean_signal = atomic_decomposition(filtered_signal, atomic_dict)
+
+# Apply Demodulation
+demodulated_signal = demodulate_am(clean_signal)
+
+# Plot Results
+plt.figure(figsize=(12, 10))
+
+# Original Jammed Signal
+plt.subplot(4, 2, 1)
+plt.plot(jammed_signal, label="Jammed Signal", color="red")
+plt.title("Jammed GPS Signal")
+plt.xlabel("Samples")
+plt.ylabel("Amplitude")
+plt.legend()
+plt.grid()
+
+plt.subplot(4, 2, 2)
+plt.plot(gps_signal, label="GPS Signal", color="red")
+plt.title("GPS Signal")
+plt.xlabel("Samples")
+plt.ylabel("Amplitude")
+plt.legend()
+plt.grid()
+
+# Matched Filter Output
+plt.subplot(4, 1, 2)
+plt.plot(filtered_signal, label="Matched Filter Output", color="blue")
+plt.title("Matched Filter Output")
+plt.xlabel("Samples")
+plt.ylabel("Amplitude")
+plt.legend()
+plt.grid()
+
+# Cleaned Signal After Jamming Suppression
+plt.subplot(4, 1, 3)
+plt.plot(clean_signal, label="Cleaned Signal", color="green")
+plt.title("Cleaned GPS Signal After Jamming Suppression")
+plt.xlabel("Samples")
+plt.ylabel("Amplitude")
+plt.legend()
+plt.grid()
+
+# Demodulated Signal
+plt.subplot(4, 1, 4)
+plt.plot(demodulated_signal, label="Demodulated Signal", color="orange")
+plt.title("Demodulated Baseband Signal")
+plt.xlabel("Samples")
+plt.ylabel("Amplitude")
+plt.legend()
+plt.grid()
+
+plt.tight_layout()
+plt.show()
